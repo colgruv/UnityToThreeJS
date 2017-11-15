@@ -1,0 +1,456 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Three.js Model Viewer</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style>
+			body {
+				background:#000;
+				color:#fff;
+				padding:0;
+				margin:0;
+				font-weight: bold;
+				overflow:hidden;
+			}
+
+			a {
+				color: #ffffff;
+			}
+
+			#info {
+				position: absolute;
+				top: 0px; width: 100%;
+				color: #ffffff;
+				padding: 5px;
+				font-family:Monospace;
+				font-size:13px;
+				text-align:center;
+				z-index:1000;
+			}
+
+			#oldie {
+				background:rgb(200,100,0) !important;
+				color:#fff;
+			}
+
+			#vt { display:none }
+			#vt, #vt a { color:orange; }
+			.code { }
+
+		</style>
+	</head>
+
+	<body>
+        <!--
+		<div id="info">
+			<a href="http://threejs.org" target="_blank">three.js</a> - webgl normalmap demo.
+			<a href="http://graphics.cs.williams.edu/data/meshes.xml#14" target="_blank">Lee Perry-Smith</a> head.
+
+			<div id="vt">displacement mapping needs vertex textures (GPU with Shader Model 3.0)<br/>
+			on Windows use <span class="code">Chrome --use-gl=desktop</span> or Firefox 4<br/>
+			please star this <a href="http://code.google.com/p/chromium/issues/detail?id=52497">Chrome issue</a> to get ANGLE support
+			</div>
+		</div>
+        -->
+
+		<script src="three.js"></script>
+		<!--<script src="../src/math/Matrix4.js"></script>
+		<script src="../src/math/Vector3.js"></script>-->
+		<script src="js/loaders/OBJLoader.js"></script>
+
+		<script src="js/Detector.js"></script>
+		<script src="js/libs/stats.min.js"></script>
+
+		<script src="js/shaders/BleachBypassShader.js"></script>
+		<script src="js/shaders/ColorCorrectionShader.js"></script>
+		<script src="js/shaders/CopyShader.js"></script>
+		<script src="js/shaders/FXAAShader.js"></script>
+
+		<script src="js/postprocessing/EffectComposer.js"></script>
+		<script src="js/postprocessing/RenderPass.js"></script>
+		<script src="js/postprocessing/ShaderPass.js"></script>
+		<script src="js/postprocessing/MaskPass.js"></script>
+
+        <script src="js/loaders/RGBELoader.js"></script>
+        <script src="js/loaders/HDRCubeTextureLoader.js"></script>
+        <script src="js/pmrem/PMREMGenerator.js"></script>
+        <script src="js/pmrem/PMREMCubeUVPacker.js"></script>
+
+		<script>
+
+			if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+
+			var container, stats, loader;
+
+			var camera, scene, renderer;
+
+			var mesh;
+			var materials;
+			var submeshes;
+
+			var directionalLight, pointLight, ambientLight;
+
+			var mouseX = 0;
+			var mouseY = 0;
+			var lastMouseX = 0;
+			var lastMouseY = 0;
+			var mouseDown = false;
+
+			var targetX = 0;
+			var targetY = 0;
+
+			var windowHalfX = window.innerWidth / 2;
+			var windowHalfY = window.innerHeight / 2;
+
+			var composer, effectFXAA;
+
+			var tLast, dt;
+			var hdrCubeRenderTarget;
+
+			init();
+			animate();
+
+			function init()
+			{
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+                // Camera
+				camera = new THREE.PerspectiveCamera( 27, window.innerWidth / window.innerHeight, 1, 10000 );
+				camera.position.z = 1500;
+				camera.position.y = 50;
+
+                // Scene
+				scene = new THREE.Scene();
+
+				// LIGHTS
+                // Ambient
+				ambientLight = new THREE.AmbientLight( 0xffffff );
+				scene.add(ambientLight);
+                // Point
+				pointLight = new THREE.PointLight( 0xffffff, 1.25, 1000 );
+				pointLight.position.set( 0, 0, 600 );
+				scene.add( pointLight );
+                // Directional
+				directionalLight = new THREE.DirectionalLight( 0xffffff );
+				directionalLight.position.set( 1, -0.5, -1 );
+				scene.add(directionalLight);
+
+			    // Set up material array
+				materials = new Array();
+
+			    // Set up submesh array
+				submeshes = new Array();
+
+			    // Environment Map
+				var genCubeUrls = function (prefix, postfix) {
+				    return [
+						prefix + 'px' + postfix, prefix + 'nx' + postfix,
+						prefix + 'py' + postfix, prefix + 'ny' + postfix,
+						prefix + 'pz' + postfix, prefix + 'nz' + postfix
+				    ];
+				};
+
+                // Load CubeMap texture
+				var hdrUrls = genCubeUrls("./textures/environment/MLHDR/", ".hdr");
+				new THREE.HDRCubeTextureLoader().load(THREE.UnsignedByteType, hdrUrls, function (hdrCubeMap) {
+                    // On CubeMap load: Set up cubemap specifications
+				    var pmremGenerator = new THREE.PMREMGenerator(hdrCubeMap);
+				    pmremGenerator.update(renderer);
+				    var pmremCubeUVPacker = new THREE.PMREMCubeUVPacker(pmremGenerator.cubeLods);
+				    pmremCubeUVPacker.update(renderer);
+				    hdrCubeRenderTarget = pmremCubeUVPacker.CubeUVRenderTarget;
+
+                    // Retrieve current URL and parse for model name
+				    var currentURL = window.location.href;
+				    var modelName = currentURL.substr(currentURL.indexOf("model=")).substr(6);
+
+                    // Load Model XML
+				    var request = new XMLHttpRequest();
+				    request.open("POST", "models/" + modelName + ".xml", true);
+				    request.setRequestHeader("Content-Type", "text/xml");
+				    request.onloadend = function () {
+                        // On Model XML Load: Parse XML file for SubMesh data
+				        var parser = new DOMParser();
+				        var xmlString = request.response;
+				        var xmlDoc = parser.parseFromString(xmlString, "text/xml");	        
+
+                        // First child node houses submeshes
+				        var childNodes = xmlDoc.documentElement.childNodes;
+				        
+				        for (var i = 0; i < childNodes.length; i++)
+				        {
+                            // Parse the Mesh child
+				            if (childNodes[i].nodeName == "Mesh")
+				            {
+                                // Initialize JSON loader to read in ThreeJS mesh data
+				                loader = new THREE.JSONLoader();
+
+                                // Iterate through all children of this node to find applicable types
+				                var submeshesXML = childNodes[i].childNodes;
+				                for (var s = 0; s < submeshesXML.length; s++)
+				                {
+				                    if (submeshesXML[s].nodeName == "Submesh")
+				                    {
+				                        var jsonObject = JSON.parse(submeshesXML[s].firstChild.data);
+
+				                        var currentGeometry = loader.parse(jsonObject).geometry;
+				                        currentGeometry.faceVertexUvs.push(currentGeometry.faceVertexUvs[0]);
+
+				                        // If valid JSON data exists, parse it and push the model data onto the Submeshes array along with the material ID
+				                        submeshes.push({
+				                                data: currentGeometry,
+                                                materialID: submeshesXML[s].getAttribute("mat")
+				                        });
+				                    }
+				                }
+				            }
+				            
+				            if (childNodes[i].nodeName == "Materials")
+				            {
+				                // Initialize Texture loader to construct materials
+				                var textureLoader = new THREE.TextureLoader();
+
+                                var materialsXML = childNodes[i].childNodes;
+                                for (var m = 0; m < materialsXML.length; m++)
+                                {
+                                    if (materialsXML[m].nodeName == "Material")
+                                    {
+                                        var matNode = materialsXML[m];
+                                        loadMaterial(matNode, textureLoader);
+										console.log("Material loaded.");
+                                    }
+                                }
+				            }
+				        }
+				        
+				        for (var s = 0; s < submeshes.length; s++)
+				        {
+				            var materialID = submeshes[s].materialID;
+				            var currentMaterial;
+				            for (var m = 0; m < materials.length; m++)
+				            {
+				                if (materials[m].name == materialID)
+				                {
+				                    currentMaterial = materials[m];
+				                }
+				            }
+
+				            if (currentMaterial == null)
+				            {
+				                placeSubMesh(submeshes[s].data, 40, new MeshPhysicalMaterial());
+				            }
+				            else
+				            {
+								console.log(currentMaterial.roughness);
+				                placeSubMesh(submeshes[s].data, 40, currentMaterial);
+				            }
+				        }
+				    };
+				    request.send();
+				});
+
+			    // RENDERER
+				renderer = new THREE.WebGLRenderer({ antialias: false });
+				renderer.setClearColor(0x666666);
+				renderer.setPixelRatio(window.devicePixelRatio);
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				container.appendChild(renderer.domElement);
+				renderer.gammaInput = true;
+				renderer.gammaOutput = true;
+
+                // STATS
+				stats = new Stats();
+				container.appendChild( stats.dom );
+
+				// COMPOSER
+				renderer.autoClear = false;
+				var renderModel = new THREE.RenderPass( scene, camera );
+				var effectBleach = new THREE.ShaderPass( THREE.BleachBypassShader );
+				var effectColor = new THREE.ShaderPass( THREE.ColorCorrectionShader );
+				effectFXAA = new THREE.ShaderPass( THREE.FXAAShader );
+
+				var canvas = renderer.context.canvas;
+
+				// Composer effects (post-processing)				
+				effectFXAA.uniforms[ 'resolution' ].value.set( 1 / window.innerWidth, 1 / window.innerHeight );
+				effectBleach.uniforms[ 'opacity' ].value = 1.0;
+				effectColor.uniforms[ 'powRGB' ].value.set( 1.4, 1.45, 1.45 );
+				effectColor.uniforms[ 'powRGB' ].value.set( 0.4, 0.4, 0.4 );
+				effectColor.uniforms[ 'mulRGB' ].value.set( 2.0, 2.0, 2.0 );
+				effectColor.renderToScreen = true;
+				composer = new THREE.EffectComposer( renderer );
+				composer.addPass( renderModel );
+				composer.addPass( effectFXAA );
+				composer.addPass( effectBleach );
+				composer.addPass( effectColor );
+				
+
+				// EVENTS
+				document.addEventListener( 'mousemove', onDocumentMouseMove, false );
+				document.addEventListener( 'mousedown', onDocumentMouseDown, false );
+				document.addEventListener( 'mouseup', onDocumentMouseUp, false );
+				window.addEventListener( 'resize', onWindowResize, false );
+			}
+			
+			function loadMaterial(matNode, textureLoader)
+			{
+				var currentMaterial = new THREE.MeshPhysicalMaterial({
+					name: matNode.getAttribute("id"),
+					color: parseInt(matNode.getAttribute("color"), 16),
+					envMap: hdrCubeRenderTarget.texture,
+					needsUpdate: true,
+					envMapIntensity: 2,
+					transparent: true
+				});
+				
+				// Check for a diffuse map in the material
+				if (matNode.getAttribute("diffuse") != null){
+					currentMaterial.map = textureLoader.load("textures/objects/" + matNode.getAttribute("diffuse"));
+				}
+				
+				// Check for a normal map in the material
+				if (matNode.getAttribute("normal") != null){
+					currentMaterial.normalMap = textureLoader.load("textures/objects/" + matNode.getAttribute("normal"));
+				}
+				
+				// Check for a metalness map in the material
+				if (matNode.getAttribute("metalnessMap") != null){
+					currentMaterial.metalnessMap = textureLoader.load("textures/objects/" + matNode.getAttribute("metalnessMap"));
+					currentMaterial.metalness = 1;
+					currentMaterial.roughnessMap = textureLoader.load("textures/objects/" + matNode.getAttribute("roughnessMap"));
+					currentMaterial.roughness = 1;
+				}
+				else{
+					currentMaterial.metalness = 0;
+					currentMaterial.roughness = 1;
+				}
+
+				// Check for an occlusion map in the material
+				if (matNode.getAttribute("occlusion") != null) {
+					currentMaterial.aoMap = textureLoader.load("textures/objects/" + matNode.getAttribute("occlusion"));
+					currentMaterial.aoMapIntensity = 1;
+				}
+				else
+					currentMaterial.aoMapIntensity = 0;
+
+				// Check for a bump map in the material
+				if (matNode.getAttribute("bump") != null) {
+					currentMaterial.bumpMap = textureLoader.load("textures/objects/" + matNode.getAttribute("bump"));
+					currentMaterial.bumpScale = 1;
+				}
+				else
+					currentMaterial.bumpScale = 0;
+					
+				// Check for an alpha map in the material
+				if (matNode.getAttribute("alphaMap") != null) {
+					console.log("Found alpha map: " + matNode.getAttribute("alphaMap"));
+					currentMaterial.alphaMap = textureLoader.load("textures/objects/" + matNode.getAttribute("alphaMap"));
+				}
+
+				materials.push(currentMaterial);
+			}
+
+			function placeSubMesh(geometry, scale, material)
+			{
+				mesh = new THREE.Mesh( geometry, material );
+				mesh.scale.x = mesh.scale.y = mesh.scale.z = scale;
+				scene.add(mesh);
+			}
+
+			function onWindowResize(event)
+			{
+				SCREEN_WIDTH = window.innerWidth;
+				SCREEN_HEIGHT = window.innerHeight;
+
+				camera.aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( SCREEN_WIDTH, SCREEN_HEIGHT );
+				composer.setSize( SCREEN_WIDTH, SCREEN_HEIGHT );
+
+				effectFXAA.uniforms[ 'resolution' ].value.set( 1 / SCREEN_WIDTH, 1 / SCREEN_HEIGHT );
+			}
+
+			function onDocumentMouseMove(event) 
+			{
+				lastMouseX = mouseX;
+				lastMouseY = mouseY;
+				mouseX = ( event.clientX - windowHalfX );
+				mouseY = ( event.clientY - windowHalfY );
+			}
+			
+			function onDocumentMouseDown(event)
+			{
+			    mouseDown = true;
+			}
+			
+			function onDocumentMouseUp(event)
+			{
+				mouseDown = false;
+			}
+
+			function rotateAroundWorldAxis(object, axis, radians)
+			{
+			    rotWorldMatrix = new THREE.Matrix4();
+			    rotWorldMatrix.makeRotationAxis(axis, radians);
+			    object.matrix.multiplyMatrices(rotWorldMatrix, object.matrix);
+			    rotWorldMatrix.extractRotation(object.matrix);
+			    object.rotation.setFromRotationMatrix(rotWorldMatrix, object.rotation.order);
+			}
+
+			function calcDT()
+			{
+			    var tCurrent = Date.now();
+			    dt = tCurrent - tLast;
+			    tLast = tCurrent;
+			}
+
+			function animate()
+			{
+			    requestAnimationFrame(animate);
+			    calcDT();
+			    handleTouchRotation();
+				render();
+				stats.update();
+			}
+
+			function handleTouchRotation()
+			{
+			    if (mouseDown)
+			    {
+			        targetX += (mouseX - lastMouseX) * .01;
+			        targetY += (mouseY - lastMouseY) * .01;
+			    }
+
+			    if (mesh)
+			    {
+			        rotateAroundWorldAxis(scene, new THREE.Vector3(0, 1, 0), (Math.PI / 180) * targetX * dt/5);
+			        rotateAroundWorldAxis(scene, new THREE.Vector3(1, 0, 0), (Math.PI / 180) * targetY * dt/5);
+
+			        targetX *= 0.95;
+			        targetY *= 0.95;
+			    }
+			}
+
+			function render() 
+			{	
+				renderer.render(scene, camera);
+			}
+
+			function parseModelFromXML(_url)
+			{
+			    var parser = new DOMParser();
+                var xml = parser.parseFromString()
+			}
+
+			function parseMaterialFromXML(_url)
+			{
+
+			}
+
+		</script>
+
+	</body>
+</html>
